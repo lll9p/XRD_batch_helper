@@ -87,3 +87,16 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# Config files
+config.ini
+
+# Log files
+app.log
+
+# vim files
+*.swp
+# INPs
+INP/*
+# other
+XRD-batch-helper.ps1
