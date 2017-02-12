@@ -17,6 +17,8 @@ class App:
         self.name = name
         self.config = config
         INP_path = self.config['PATH'].getpath('INP_path')
+        if not INP_path.exsists():
+            INP_path.mkdir()
         self.data = {'TC_location': self.config['PATH'].getpath('TC_location'),
                      'TOPAS_location': self.config['PATH'].getpath('TOPAS_location'),
                      'INPs': {file.name: file for file in INP_path.glob('*.inp')}
