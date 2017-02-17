@@ -17,7 +17,7 @@ class App:
         self.name = name
         self.config = config
         INP_path = self.config['PATH'].getpath('INP_path')
-        if not INP_path.exsists():
+        if not INP_path.exists():
             INP_path.mkdir()
         self.data = {'TC_location': self.config['PATH'].getpath('TC_location'),
                      'TOPAS_location': self.config['PATH'].getpath('TOPAS_location'),
@@ -220,7 +220,7 @@ class ProcesserFrame(ttk.Frame):
         self.control_frame = control_frame
         self.INP_names = list(self.data.get('INPs').keys())
         self.INP_filename = tk.StringVar()
-        self.INP_filename.set(self.INP_names[0])
+        self.INP_filename.set(self.INP_names[0] if self.INP_names else '')
         self.output_filename = tk.StringVar()
         self.create_widgets()
 
