@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import configparser
+import csv
 import logging
 import os
 import pathlib
+import re
 import subprocess
+import sys
+import time
 import tkinter as tk
 import tkinter.filedialog as filedialog
 from tkinter import font, messagebox, ttk
+
+import psutil
 
 
 class Config(configparser.ConfigParser):
@@ -60,15 +66,17 @@ class ProcesserFrame(ttk.Frame):
         self.tasks = self.data.get('tasks')
         self.app = self.data.get('app')
         self.logger = logger
+        self.inp_path = self.data.get('inp_path')
         self.control_frame = control_frame
-        self.INP_names = list(self.data.get('INPs').keys())
+        self.INP_names = list(self.data.get('inp_filenames').keys())
         self.INP_filename = tk.StringVar()
         self.INP_filename.set(self.INP_names[0] if self.INP_names else '')
-        self.output_filename = tk.StringVar()
-        self.task = {'program': self.data.get('TC_location', ''),
-                     'inp': self.INP_filename,  # INP_filename could be void string
+        self.task = {'program': pathlib.Path(self.data.get('TC_location', '')),
+                     # INP_filename could be void string
+                     'inp': self.inp_path.absolute() / self.INP_filename.get(),
                      'patterns': list(),
                      'processer': self,
+                     'output': None,
                      }  # TODO: add a default TC to it
         self.tasks[hash(self)] = self.task
         self.create_widgets()
@@ -80,7 +88,9 @@ class ProcesserFrame(ttk.Frame):
         self.separator = ttk.Separator(master=self, orient=tk.HORIZONTAL)
 
         self.destry_button = ttk.Button(
-            self, text='X', command=self.destroy_processer, width=2)
+            self, text='X',
+            command=self.destroy_processer,
+            width=2)
         self.destry_button.grid(row=1, column=0)
 
         self.INP_combobox = ttk.Combobox(
@@ -91,45 +101,59 @@ class ProcesserFrame(ttk.Frame):
         self.INP_combobox.bind('<<ComboboxSelected>>', self.select_INP)
 
         self.INP_choose_button = ttk.Button(
-            self, text='I', command=self.choose_INP, width=2)
+            self, text='I',
+            command=self.choose_INP,
+            width=2)
         self.INP_choose_button.grid(row=1, column=2)
 
         self.pattens_choose_button = ttk.Button(
-            self, text='F', command=self.choose_pattens, width=2)
+            self, text='F',
+            command=self.choose_pattens,
+            width=2)
         self.pattens_choose_button.grid(row=1, column=3)
 
         self.pattens_dir_choose_button = ttk.Button(
-            self, text='D', command=self.choose_pattens_dir, width=2)
+            self, text='D',
+            command=self.choose_pattens_dir,
+            width=2)
         self.pattens_dir_choose_button.grid(row=1, column=4)
 
         self.output_choose_button = ttk.Button(
-            self, text='O', command=self.choose_output, width=2)
+            self, text='O',
+            command=self.choose_output,
+            width=2)
         self.output_choose_button.grid(row=1, column=5)
 
         self.process_button = ttk.Button(
-            self, text='√', command=self.process, width=2)
+            self, text='√',
+            command=self.process,
+            width=2)
         self.process_button.grid(row=1, column=6)
 
     def choose_INP(self, title='Choose a TOPAS INP file'):
         INP_file = filedialog.askopenfilename(
-            defaultextension='.inp', title=title)
-        if not os.path.isfile(INP_file):
+            defaultextension='.inp',
+            filetypes=[('INP files', '.inp')],
+            title=title)
+        INP_file = pathlib.Path(INP_file)
+        if not INP_file.is_file():
             return
-        INP_file_short_name = os.path.split(os.path.abspath(INP_file))[1]
+        INP_file_short_name = INP_file.name
         if INP_file_short_name in self.INP_names:
             self.logger.info(
                 f'User choose a INP ({INP_file}) which duplicates with INP dir\'s.')
         conflict_filenames = list(
-            filter(lambda x: x.startswith(INP_file_short_name), self.INP_names))
+            filter(lambda x: x.startswith(INP_file_short_name),
+                   self.INP_names))
         if len(conflict_filenames) != 0:
             for i in range(len(conflict_filenames) + 1):
                 tmp = INP_file_short_name + f'({i})'
                 if tmp not in self.INP_names:
                     INP_file_short_name = tmp
                     break
-        self.data['INPs'][INP_file_short_name] = INP_file
+        self.data['inp_filenames'][INP_file_short_name] = INP_file
         self.INP_filename.set(INP_file_short_name)
-        self.task['inp'] = self.INP_filename.get()
+        self.task['inp'] = INP_file
         self.update_INP_combobox_values()
 
     def update_INP_combobox_values(self):
@@ -139,19 +163,26 @@ class ProcesserFrame(ttk.Frame):
         '''
         Change task filename after select an INP
         '''
-        self.task['inp'] = self.INP_filename.get()
+        self.task['inp'] = self.data['inp_filenames'][self.INP_filename.get()]
 
     def choose_pattens(self):
-        patterns = filedialog.askopenfilenames(defaultextension='.raw', filetypes=[(
-            'Bruker raw file patterns', '.raw')], title='Choose .raw file(s) of patterns')
+        patterns = filedialog.askopenfilenames(
+            defaultextension='.raw',
+            filetypes=[
+                ('Bruker raw file patterns', '.raw')],
+            title='Choose .raw file(s) of patterns')
         self.task['patterns'].extend(set(patterns))
+        self.task['patterns'] = list(set(self.task['patterns']))
 
     def choose_pattens_dir(self):
         patterns_dir = filedialog.askdirectory(
             title='Choose a dir to read all patterns it contains')
         if os.path.isdir(patterns_dir):
-            patterns = list(map(lambda f: os.path.join(patterns_dir, f), filter(
-                lambda f: f.endswith('.raw'), os.listdir(patterns_dir))))
+            patterns = list(
+                map(lambda f: os.path.join(patterns_dir, f),
+                    filter(
+                    lambda f: f.endswith('.raw'),
+                        os.listdir(patterns_dir))))
             self.task['patterns'].extend(patterns)
             self.task['patterns'] = list(set(self.task['patterns']))
         else:
@@ -159,14 +190,31 @@ class ProcesserFrame(ttk.Frame):
                 title='Alert', message='You choose an invalid directory!')
 
     def choose_output(self):
-        output = filedialog.asksaveasfilename(defaultextension='.txt', filetypes=[(
-            'text report', '.txt'), ('microsoft excel', '.xlsx')], title='Choose file to output results')
-        self.output = output
+        output = filedialog.asksaveasfilename(
+            defaultextension='.csv',
+            filetypes=[('Comma-separated values file', '.csv'),
+                       ('text report', '.txt'),
+                       ('microsoft excel', '.xlsx')],
+            title='Choose file to output results')
+        if not output:
+            output = self.app.path / 'result.csv'
+        self.task['output'] = pathlib.Path(output)
+        return self.task['output']
+
+    def choose_output_alert(self):
+        patterns = '\n' + '\n'.join(self.task['patterns'])
+        string = f'You must choose an output file for patterns:{patterns}'
+        messagebox.showinfo(title='About', message=string)
+        self.choose_output()
 
     def process(self):
-        self.app.process(hash(self))
-        self.logger.info(
-            f'Using {self.data["TC_location"]} process {", ".join(self.task["patterns"])} with {self.INP_filename.get()}')
+        try:
+            self.app.process(hash(self))
+            self.master.change_button_color(self.process_button, 'green')
+        except Exception as e:
+            self.master.change_button_color(self.process_button, 'red')
+            self.logger.info(f'processerframe.process: {e}')
+            raise e
 
 
 class ControlFrame(ttk.Frame):
@@ -181,44 +229,68 @@ class ControlFrame(ttk.Frame):
 
     def create_processer(self):
         processer = ProcesserFrame(
-            self.master, control_frame=self, data=self.data, logger=self.logger)
+            self.master, control_frame=self,
+            data=self.data,
+            logger=self.logger)
         processer.grid()
 
     def destroy_processer(self, processer):
         try:
             self.tasks.pop(hash(processer))
             processer.destroy()
-        except IndexError:
+        except IndexError as e:
             self.logger.info('processer to be remove but not exists.')
+            raise e
 
     def create_widgets(self):
         self.create_processer_button = ttk.Button(
-            self, text='+', command=self.create_processer, width=2)
+            self, text='+',
+            command=self.create_processer,
+            width=2)
         self.create_processer_button.grid(row=0, column=0)
         self.TC_button = ttk.Button(
-            self, text='TC', command=self.select_TC, width=2)
+            self, text='TC',
+            command=self.select_TC,
+            width=2)
         self.TC_button.grid(row=0, column=1)
 
         self.process_all_button = ttk.Button(
-            self, text='√', command=self.process_all, width=2)
+            self, text='√',
+            command=self.process_all,
+            width=2)
         self.process_all_button.grid(row=0, column=2)
 
         self.about_button = ttk.Button(
-            self, text='About', command=self.about)
+            self, text='About',
+            command=self.about)
         self.about_button.grid(row=0, column=3)
 
     def select_TC(self):
-        self.data['TC_location'] = pathlib.Path(filedialog.askopenfilename(
-            defaultextension='.exe', filetypes=[('Executable', '.exe')], title='Find the TOPAS tc.exe'))
+        self.data['TC_location'] = pathlib.Path(
+            filedialog.askopenfilename(
+                defaultextension='.exe',
+                filetypes=[('Executable', '.exe')],
+                title='Find the TOPAS tc.exe'))
 
     def process_all(self):
+        success = 0
         for task in self.tasks.keys():
-            self.app.process(task)
+            try:
+                processer = self.tasks[task]['processer']
+                processer.process()
+            except Exception as e:
+                success += 1
+                self.logger.info(f'controlframe.process_all: {e}')
+        if success == 0:
+            self.master.change_button_color(self.process_all_button, 'green')
+        elif success != 0:
+            self.master.change_button_color(self.process_all_button, 'red')
 
     def update_processers_INP_combobox(self):
         # Update the INP_name list
-        INP_names = list(self.data.get('INPs').keys())
-        for processer in self.processers:
+        INP_names = list(self.data.get('inp_filenames').keys())
+        for task, v in self.tasks.items():
+            processer = v.get('processer')
             if isinstance(processer, ProcesserFrame):
                 processer.INP_names = INP_names
                 processer.INP_combobox.configure(values=INP_names)
@@ -226,8 +298,8 @@ class ControlFrame(ttk.Frame):
     def about(self):
         string = '''Auther : Lao Lilin
 Email  : LAOLILIN1@crcement.com
-Version: 0.01
-Date   : 2017-02-07 10:17
+Version: 0.02
+Date   : 2017-02-25 15:55
 '''
         messagebox.showinfo(title='About', message=string)
 
@@ -255,6 +327,13 @@ class AppGUI(ttk.tkinter.Tk):
 
     def on_exit(self):
         self.destroy()
+
+    @staticmethod
+    def change_button_color(button, color):
+        if color == 'green':
+            button.configure(style='green.TButton')
+        elif color == 'red':
+            button.configure(style='red.TButton')
 
     def set_style(self):
         self.style = ttk.Style()
@@ -300,20 +379,128 @@ class App:
         self.logger = logger
         self.name = name
         self.config = config
-        INP_path = self.config['PATH'].getpath('INP_path')
+        self.inp_path = self.config['PATH'].getpath('inp_path')
         self.TC_location = self.config['PATH'].getpath('TC_location')
         self.TOPAS_location = self.config['PATH'].getpath('TOPAS_location')
-        if not INP_path.exists():
-            INP_path.mkdir()
+        if not self.inp_path.exists():
+            self.inp_path.mkdir()
         self.tasks = dict()
-        self.data = {'TC_location': self.config['PATH'].getpath('TC_location'),
-                     'TOPAS_location': self.config['PATH'].getpath('TOPAS_location'),
-                     'INPs': {file.name: file for file in INP_path.glob('*.inp')},
-                     'tasks': self.tasks,
-                     'app': self,
-                     }
+        self.data = {
+            'TC_location': self.config['PATH'].getpath('TC_location'),
+            'TOPAS_location': self.config['PATH'].getpath('TOPAS_location'),
+            'inp_filenames': {file.name: file.absolute() for file in self.inp_path.glob('*.inp')},
+            'inp_path': self.inp_path,
+            'tasks': self.tasks,
+            'app': self,
+        }
+
+    def process(self, task_id):
+        task = self.tasks.get(task_id, {})
+        output = task.get('output')
+        if output is None:
+            task.get('processer').choose_output_alert()
+            self.process(task_id)
+            return
+        patterns = list(set(task.get('patterns', [])))
+        if len(patterns) == 0:
+            self.logger.info('app.process: processing Nothing')
+            return
+        results = list()
+        program = task.get('program').absolute()
+        inp = task.get('inp').absolute()
+        tc = self.data.get('TC_location').absolute()
+        topas = self.data.get('TOPAS_location').absolute()
+        self.logger.info(
+            f'app.process: Using {program} process {", ".join(patterns)} with {inp}')
+        if program == tc:
+            process_func = self.process_TC
+        elif program == topas:
+            process_func = self.process_TP
+        else:
+            errs = 'Cannot find process program (TC/TP)'
+            self.logger.info(f'app.process: {errs}')
+            raise Exception(errs)
+        try:
+            for pattern in patterns:
+                results.append(process_func(tc, inp, pattern))
+        except Exception as e:
+            self.logger.info(f'app.process: {program} {inp} ERROR:{e}')
+            raise e
+        # Assume that the same INP generate the same columns of data
+        headers = []
+        for result in results:
+            for key in result:
+                if key not in headers:
+                    headers.append(key)
+        with open(output, 'a', newline='') as f:
+            f_csv = csv.DictWriter(f, headers)
+            f_csv.writeheader()
+            f_csv.writerows(results)
+
+    def process_TC(self, tc, inp, pattern):
+        pattern = pathlib.Path(pattern).absolute()
+        self.logger.info(f'app.process_TC: processing {inp}-{pattern}')
+        if not inp.exists() or not pattern.exists():
+            raise
+        result = dict()
+        r_wp = []
+        weights = []
+        inp_content = inp.read_text()
+        xdd_start = inp_content.find('xdd')
+        xdd_stop = inp_content.find('\n\t', xdd_start)
+        xdd_string = inp_content[xdd_start:xdd_stop]
+        inp_content = inp_content.replace(xdd_string, f'xdd "{pattern}"')
+        inp_tmp = pathlib.Path('.') / (str(round(time.time())) + '.inp')
+        with open(inp_tmp, mode='w') as f:
+            f.write(inp_content)
+        inp_out = inp_tmp.with_suffix('.out')
+        proc = subprocess.Popen(args=[str(tc), str(inp_tmp)],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        try:
+            outs, errs = proc.communicate(timeout=150)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            outs, errs = proc.communicate()
+            self.logger.info(f'app.process_TC: {outs}-{errs}')
+        try:
+            with open(inp_out, mode='r') as f:
+                inp_output = f.read()
+            id = [('id', pattern.with_suffix('').name)]
+            r_wp = re.findall(r'.*?(r_wp)  (\d+\.\d+).*',
+                              inp_output, re.DOTALL)
+            weights = re.findall(
+                r'phase_name "(.*?)".*?MVW\( \d+\.\d+, \d+\.\d+`, (\d+\.\d+)`\)',
+                inp_output, re.DOTALL)
+        except Exception as e:
+            self.logger.info(f'app.process_TP: {e}')
+        result = {name: value for name, value in id + r_wp + weights}
+        inp_tmp.unlink()
+        inp_out.unlink()
+        return result
+
+    def process_TP(self, tp, inp, pattern):
+        # TODO: Use AutoHotkey control TOPAS GUI-Mode
+        print(f'processing {pattern}')
+        return
 
     def run(self):
+        pid = 42
+        try:
+            with open('app.pid', mode='r') as f:
+                pid = int(f.read())
+        except Exception:
+            with open('app.pid', mode='w') as f:
+                pid = os.getpid()
+                f.write(str(pid))
+        if psutil.pid_exists(pid):
+            proc = psutil.Process(pid)
+            if proc.name() == 'python.exe' or proc.cwd() == os.getcwd():
+                sys.exit()
+        else:
+            with open('app.pid', mode='w') as f:
+                pid = os.getpid()
+                f.write(str(pid))
         self.gui = AppGUI(data=self.data,
                           logger=self.logger,
                           title=self.name,
@@ -322,74 +509,15 @@ class App:
         # TODO when self.data changed, config needs to be changed too.
         self.config.update_config()
 
-    def process(self, task_id):
-        task = self.tasks.get(task_id, {})
-        program = task.get('program')
-        inp = task.get('inp')
-        patterns = task.get('patterns', [])
-        processer = task.get('processer')
-        if program.absolute() == self.data.get('TC_location').absolute():
-            process_func = self.process_TC
-        elif program.absolute() == self.data.get('TOPAS_location').absolute():
-            process_func = self.process_TP
-        else:
-            raise
-        for pattern in patterns:
-            process_func(inp, pattern)
-        processer.process_button.configure(style='green.TButton')
 
-    def process_TC(self, inp, raw):
-        # raw_path > QT_TMP
-        # 'C:\TOPAS5\tc "C:\Users\Administrator\Desktop\batcher\INP\QT_TMP"'
-        '''
-        function get_params($result_path)
-        {
-            $lines = (Get-Content $result_path)
-            $params = [System.Collections.ArrayList]@()
-            $values = [System.Collections.ArrayList]@()
-            foreach($line in $lines){
-                if(($line -match '^r_exp.*(r_wp)  (\d+\.\d+)')){
-                    $_T = $params.Add($Matches[1])
-                        $_T = $values.Add($Matches[2])
-                }
-                if(($line -match 'phase_name "(.*)"'))
-                {
-                   $_T = $params.Add($Matches[1])
-                }
-                if($line -match 'MVW\(.* (\d+\.\d+)\`\)$')
-                {
-                    $_T = $values.Add($Matches[1])
-                }
-            }
-            return $params,$values
-        }
-        '''
-        print(f'processing {raw}')
-        return
-        # d.replace(d[d.find('xdd'):stop], 'xss sdsdfsdf')
-        proc = subprocess.Popen(args=self.TC_location,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE)
-        try:
-            outs, errs = proc.communicate(timeout=150)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            outs, errs = proc.communicate()
-
-    def process_TP(self, inp, raw):
-        # TODO: Use AutoHotkey control TOPAS GUI-Mode
-        print(f'processing {raw}')
-        return
-
-
-def main(file_path=os.path.dirname(os.path.abspath(__file__))):
+def main(file_path):
     PATH = pathlib.Path(file_path)
     LOGLEVEL = 'DEBUG'
     NAME = 'XRD batch helper'
     CONFIGFILE = PATH / 'config.ini'
     DEFAULT_SETTINGS = {
         'PATH': {
-            'INP_path': PATH / 'INP',
+            'inp_path': 'INP',
             'tc_location': r'C:\TOPAS5\tc.exe',
             'TOPAS_location': r'C:\TOPAS5\Topas.exe',
         },
@@ -405,4 +533,9 @@ def main(file_path=os.path.dirname(os.path.abspath(__file__))):
 
 
 if __name__ == "__main__":
-    main(file_path=os.path.dirname(os.path.abspath(__file__)))
+    if hasattr(sys, 'frozen'):
+        basis = sys.executable
+    else:
+        basis = sys.argv[0]
+    required_folder = os.path.split(basis)[0]
+    main(file_path=required_folder)
