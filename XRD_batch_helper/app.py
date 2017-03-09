@@ -388,7 +388,7 @@ class App:
         self.data = {
             'TC_location': self.config['PATH'].getpath('TC_location'),
             'TOPAS_location': self.config['PATH'].getpath('TOPAS_location'),
-            'inp_filenames': {file.name: file.absolute() for file in self.inp_path.glob('*.inp')},
+            'inp_filenames': {file.name: file.absolute() for file in self.inp_path.glob('**/*.inp')},
             'inp_path': self.inp_path,
             'tasks': self.tasks,
             'app': self,
