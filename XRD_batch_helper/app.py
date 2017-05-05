@@ -99,6 +99,7 @@ class ProcesserFrame(ttk.Frame):
             values=self.INP_names)
         self.INP_combobox.grid(row=1, column=1)
         self.INP_combobox.bind('<<ComboboxSelected>>', self.select_INP)
+        self.INP_combobox.bind('<Configure>', self.on_combobox_configure)
 
         self.INP_choose_button = ttk.Button(
             self, text='I',
@@ -124,11 +125,20 @@ class ProcesserFrame(ttk.Frame):
             width=2)
         self.output_choose_button.grid(row=1, column=5)
 
+        self.process_button_text = tk.StringVar()
+        self.process_button_text.set('√')
         self.process_button = ttk.Button(
-            self, text='√',
+            self, textvariable=self.process_button_text,
             command=self.process,
             width=2)
         self.process_button.grid(row=1, column=6)
+
+    def on_combobox_configure(self, event):
+        max_len = max(len(str(i)) for i in self.data['inp_filenames'].values())
+        combo_font = font.nametofont(str(event.widget.cget('font')))
+        width = combo_font.measure(max_len * '0') - event.width
+        style = ttk.Style()
+        style.configure('TCombobox', postoffset=(0, 0, width, 0))
 
     def choose_INP(self, title='Choose a TOPAS INP file'):
         INP_file = filedialog.askopenfilename(
@@ -208,13 +218,15 @@ class ProcesserFrame(ttk.Frame):
         self.choose_output()
 
     def process(self):
+        success = False
         try:
-            self.app.process(hash(self))
-            self.master.change_button_color(self.process_button, 'green')
+            success = self.app.process(hash(self))
         except Exception as e:
-            self.master.change_button_color(self.process_button, 'red')
             self.logger.info(f'processerframe.process: {e}')
-            raise e
+        if success:
+            self.master.change_button_color(self.process_button, 'green')
+        else:
+            self.master.change_button_color(self.process_button, 'red')
 
 
 class ControlFrame(ttk.Frame):
@@ -395,7 +407,9 @@ class App:
         }
 
     def process(self, task_id):
+        success = True
         task = self.tasks.get(task_id, {})
+        processer = task['processer']
         output = task.get('output')
         if output is None:
             task.get('processer').choose_output_alert()
@@ -420,12 +434,21 @@ class App:
             errs = 'Cannot find process program (TC/TP)'
             self.logger.info(f'app.process: {errs}')
             raise Exception(errs)
-        try:
-            for pattern in patterns:
-                results.append(process_func(tc, inp, pattern))
-        except Exception as e:
-            self.logger.info(f'app.process: {program} {inp} ERROR:{e}')
-            raise e
+        patterns_len = len(patterns)
+        patterns_width = len(str(patterns_len)) * 2 + 1
+        for index, pattern in enumerate(patterns, start=1):
+            processer.process_button_text.set(f'{index}/{patterns_len}')
+            processer.process_button.configure(width=patterns_width)
+            self.gui.update_idletasks()
+            pattern = pathlib.Path(pattern).absolute()
+            try:
+                result = process_func(tc, inp, pattern)
+            except Exception as e:
+                self.logger.info(f'app.process: {program} {inp} ERROR:{e}')
+                result = {'id': pattern.with_suffix('').name, 'r_wp': 0.00}
+                success = False
+            results.append(result)
+
         # Assume that the same INP generate the same columns of data
         headers = []
         for result in results:
@@ -436,9 +459,14 @@ class App:
             f_csv = csv.DictWriter(f, headers)
             f_csv.writeheader()
             f_csv.writerows(results)
+        # Clear the output and input files
+        task['output'] = None
+        task['patterns'] = list()
+        processer.process_button_text.set('√')
+        processer.process_button.configure(width=2)
+        return success
 
     def process_TC(self, tc, inp, pattern):
-        pattern = pathlib.Path(pattern).absolute()
         self.logger.info(f'app.process_TC: processing {inp}-{pattern}')
         if not inp.exists() or not pattern.exists():
             raise
@@ -454,7 +482,11 @@ class App:
         with open(inp_tmp, mode='w') as f:
             f.write(inp_content)
         inp_out = inp_tmp.with_suffix('.out')
+        info = subprocess.STARTUPINFO()
+        info.dwFlags = subprocess.CREATE_NEW_CONSOLE | subprocess.STARTF_USESHOWWINDOW
+        info.wShowWindow = subprocess.SW_HIDE
         proc = subprocess.Popen(args=[str(tc), str(inp_tmp)],
+                                startupinfo=info,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
         try:
@@ -463,17 +495,19 @@ class App:
             proc.kill()
             outs, errs = proc.communicate()
             self.logger.info(f'app.process_TC: {outs}-{errs}')
+        id = [('id', pattern.with_suffix('').name)]
         try:
             with open(inp_out, mode='r') as f:
                 inp_output = f.read()
-            id = [('id', pattern.with_suffix('').name)]
             r_wp = re.findall(r'.*?(r_wp)  (\d+\.\d+).*',
                               inp_output, re.DOTALL)
             weights = re.findall(
-                r'phase_name "(.*?)".*?MVW\( \d+\.\d+, \d+\.\d+`, (\d+\.\d+)`\)',
+                r'phase_name "(.*?)".*?MVW\( \d+\.\d+`?, \d+\.\d+`?, (\d+\.\d+)`?\)',
                 inp_output, re.DOTALL)
         except Exception as e:
-            self.logger.info(f'app.process_TP: {e}')
+            self.logger.info(f'app.process_TC: {e}')
+            r_wp = ['r_wp', 0.00]
+            weights = ['error', 0.00]
         result = {name: value for name, value in id + r_wp + weights}
         inp_tmp.unlink()
         inp_out.unlink()
